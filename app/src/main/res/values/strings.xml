@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">LevelUp</string>
+    <string name="answer">Antwort</string>
+    <string name="correct">✔ Richtig!</string>
+    <string name="incorrect">✖ Falsch, richtig: %1$d</string>
+    <string name="check">Prüfen</string>
+    <string name="next">Weiter</string>
 </resources>
