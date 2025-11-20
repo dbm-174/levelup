@@ -1,7 +1,6 @@
-
-
 package de.dbmlab.levelup
 
+import android.content.Context
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -13,7 +12,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -21,35 +21,64 @@ import de.dbmlab.levelup.ui.theme.LevelUpTheme
 import kotlinx.coroutines.delay
 import kotlin.random.Random
 
-enum class TaskType { MULTIPLY, ADD, SUB }
+// -------------------------------------------------------------
+// Multiplikations-Pool (1x1 bis 10x10) mit Gewichten
+// -------------------------------------------------------------
 
-data class Task(val question: String, val result: Int)
+data class MultiTask(val a: Int, val b: Int, var weight: Int = 5)
 
-/* -------------------------
-   SPACED REPETITION:
-   Multiplication tasks stored in a pool with weights.
-   Correct answers decrease weight, making tasks rarer.
----------------------------- */
-
-val multiplyPool = mutableStateListOf(
-    Triple(2, 2, 5),
-    Triple(3, 4, 5),
-    Triple(5, 6, 5),
-    Triple(7, 8, 5),
-    Triple(9, 3, 5),
-    Triple(4, 9, 5),
-)
-
-fun pickFromWeighted(pool: List<Triple<Int, Int, Int>>): Triple<Int, Int, Int> {
-    val expanded = pool.flatMap { triple -> List(triple.third) { triple } }
-    return expanded.random()
+fun createInitialPool(): MutableList<MultiTask> {
+    return (1..10).flatMap { a ->
+        (1..10).map { b ->
+            MultiTask(a, b, 5)
+        }
+    }.toMutableList()
 }
 
-fun generateTask(): Task {
+// Speichern
+fun saveWeights(context: Context, pool: List<MultiTask>) {
+    val prefs = context.getSharedPreferences("weights", Context.MODE_PRIVATE)
+    val editor = prefs.edit()
+    pool.forEach { task ->
+        editor.putInt("${task.a}x${task.b}", task.weight)
+    }
+    editor.apply()
+}
+
+// Laden
+fun loadWeights(context: Context, pool: List<MultiTask>) {
+    val prefs = context.getSharedPreferences("weights", Context.MODE_PRIVATE)
+    pool.forEach { task ->
+        val key = "${task.a}x${task.b}"
+        val stored = prefs.getInt(key, task.weight)
+        task.weight = stored
+    }
+}
+
+// Gewichtete Auswahl
+fun pickWeighted(pool: List<MultiTask>): MultiTask {
+    val total = pool.sumOf { it.weight }
+    var rnd = (1..total).random()
+    for (t in pool) {
+        rnd -= t.weight
+        if (rnd <= 0) return t
+    }
+    return pool.last()
+}
+
+// -------------------------------------------------------------
+// Aufgabe generieren (inkl. Add + Sub)
+// -------------------------------------------------------------
+
+enum class TaskType { MULTIPLY, ADD, SUB }
+
+data class Task(val question: String, val result: Int, val multiRef: MultiTask? = null)
+
+fun generateTask(pool: List<MultiTask>): Task {
     return when (TaskType.values().random()) {
         TaskType.MULTIPLY -> {
-            val (a, b, _) = pickFromWeighted(multiplyPool)
-            Task("$a × $b", a * b)
+            val t = pickWeighted(pool)
+            Task("${t.a} × ${t.b}", t.a * t.b, t)
         }
         TaskType.ADD -> {
             val a = Random.nextInt(0, 101)
@@ -64,23 +93,19 @@ fun generateTask(): Task {
     }
 }
 
-fun updateWeights(task: Task, correct: Boolean) {
-    multiplyPool.replaceAll {
-        if ("×" in task.question) {
-            val parts = task.question.split(" × ")
-            val a = parts[0].toInt()
-            val b = parts[1].toInt()
-            if (it.first == a && it.second == b) {
-                val newWeight = if (correct) (it.third - 1).coerceAtLeast(1) else (it.third + 2)
-                Triple(it.first, it.second, newWeight)
-            } else it
-        } else it
+// Gewicht anpassen
+fun updateWeight(ref: MultiTask?, correct: Boolean) {
+    if (ref == null) return
+    ref.weight = if (correct) {
+        (ref.weight - 1).coerceAtLeast(1)
+    } else {
+        (ref.weight + 2).coerceAtMost(20)
     }
 }
 
-/* -------------------------
-   SUCCESS ANIMATION
----------------------------- */
+// -------------------------------------------------------------
+// Erfolg-Animation
+// -------------------------------------------------------------
 
 @Composable
 fun SuccessAnimation(modifier: Modifier = Modifier) {
@@ -90,6 +115,7 @@ fun SuccessAnimation(modifier: Modifier = Modifier) {
         delay(900)
         visible = false
     }
+
     if (!visible) return
 
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
@@ -104,6 +130,7 @@ fun SuccessAnimation(modifier: Modifier = Modifier) {
             tint = Color(0xFF2E7D32),
             modifier = Modifier.size(72.dp).offset(y = offsetY)
         )
+
         StarsOverlay()
     }
 }
@@ -125,43 +152,62 @@ fun StarsOverlay() {
         }
 
         val animatedScale by animateFloatAsState(
-            targetValue = scale, animationSpec = tween(300), label = ""
+            targetValue = scale,
+            animationSpec = tween(300),
+            label = ""
         )
 
         Icon(
             imageVector = Icons.Default.Star,
             contentDescription = null,
             tint = Color(0xFFFFD600),
-            modifier = Modifier.size(28.dp).offset(x = x, y = y).graphicsLayer(
-                scaleX = animatedScale,
-                scaleY = animatedScale,
-                alpha = animatedScale
-            )
+            modifier = Modifier
+                .size(28.dp)
+                .offset(x = x, y = y)
+                .graphicsLayer(
+                    scaleX = animatedScale,
+                    scaleY = animatedScale,
+                    alpha = animatedScale
+                )
         )
     }
 }
 
-/* -------------------------
-   MAIN GAME: 20 QUESTIONS
----------------------------- */
+// -------------------------------------------------------------
+// HAUPTSPIEL – 20 FRAGEN + Neustart
+// -------------------------------------------------------------
 
 @Composable
 fun MathTrainerScreen() {
-    var task by remember { mutableStateOf(generateTask()) }
+
+    val context = LocalContext.current
+
+    var pool by remember { mutableStateOf(createInitialPool()) }
+
+    LaunchedEffect(Unit) {
+        loadWeights(context, pool)
+    }
+
+    var task by remember { mutableStateOf(generateTask(pool)) }
     var answer by remember { mutableStateOf("") }
     var feedback by remember { mutableStateOf<String?>(null) }
     var showSuccessAnimation by remember { mutableStateOf(false) }
 
     var score by remember { mutableStateOf(0) }
     var questionIndex by remember { mutableStateOf(1) }
-    val totalQuestions = 3
+    val totalQuestions = 20
 
     fun newTask() {
-        if (questionIndex > totalQuestions) return
-        task = generateTask()
+        task = generateTask(pool)
         answer = ""
         feedback = null
         showSuccessAnimation = false
+    }
+
+    fun restart() {
+        score = 0
+        questionIndex = 1
+        newTask()
     }
 
     LevelUpTheme {
@@ -173,8 +219,25 @@ fun MathTrainerScreen() {
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
 
-                    Text("Frage $questionIndex / $totalQuestions", fontSize = 22.sp)
+                    if (questionIndex > totalQuestions) {
+                        Text(
+                            "Spiel beendet!\nPunkte: $score / $totalQuestions",
+                            fontSize = 36.sp,
+                            fontWeight = FontWeight.Bold
+                        )
 
+                        Spacer(modifier = Modifier.height(32.dp))
+
+                        Button(
+                            onClick = { restart() },
+                            modifier = Modifier.width(200.dp)
+                        ) {
+                            Text("Neustart", fontSize = 24.sp)
+                        }
+                        return@Column
+                    }
+
+                    Text("Frage $questionIndex / $totalQuestions", fontSize = 22.sp)
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Text(
@@ -192,7 +255,7 @@ fun MathTrainerScreen() {
                             if (it.length <= 4 && it.all { c -> c.isDigit() }) answer = it
                         },
                         singleLine = true,
-                        textStyle = LocalTextStyle.current.copy(fontSize = 28.sp),
+                        textStyle = TextStyle(fontSize = 28.sp),
                         modifier = Modifier.width(200.dp),
                         enabled = feedback == null
                     )
@@ -208,7 +271,8 @@ fun MathTrainerScreen() {
                                 val userValue = answer.toIntOrNull()
                                 val correct = userValue == task.result
 
-                                updateWeights(task, correct)
+                                updateWeight(task.multiRef, correct)
+                                saveWeights(context, pool)
 
                                 if (correct) {
                                     showSuccessAnimation = true
@@ -219,15 +283,14 @@ fun MathTrainerScreen() {
                                 }
                             } else {
                                 questionIndex++
-                                newTask()
+                                if (questionIndex <= totalQuestions) {
+                                    newTask()
+                                }
                             }
                         },
                         modifier = Modifier.width(200.dp)
                     ) {
-                        Text(
-                            if (feedback == null) "Prüfen" else "Weiter",
-                            fontSize = 24.sp
-                        )
+                        Text(if (feedback == null) "Prüfen" else "Weiter", fontSize = 24.sp)
                     }
 
                     Spacer(modifier = Modifier.height(24.dp))
@@ -236,17 +299,9 @@ fun MathTrainerScreen() {
                         Text(
                             text = it,
                             fontSize = 28.sp,
-                            color = if (it == correctText) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                            color = if (it == correctText) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error,
                             fontWeight = FontWeight.SemiBold
-                        )
-                    }
-
-                    if (questionIndex > totalQuestions) {
-                        Spacer(modifier = Modifier.height(40.dp))
-                        Text(
-                            "Spiel beendet!\nPunkte: $score / $totalQuestions",
-                            fontSize = 36.sp,
-                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
